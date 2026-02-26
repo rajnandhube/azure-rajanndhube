@@ -1,82 +1,66 @@
 # ============================================================
-# Script: Find Key Vault Secrets Without Expiry Date
-# Scope : All Subscriptions & All Key Vaults
+# Script: Find Key Vault Secrets Without Expiry (Mac/All-Subs)
 # ============================================================
 
-# Connect to Azure
-Connect-AzAccount
-
-# Output collection
-$results = @()
-
-# Get all subscriptions
+# Get ALL subscriptions across all tenants you just logged into
 $subscriptions = Get-AzSubscription
 
+if ($null -eq $subscriptions) {
+    Write-Error "No subscriptions found. Run 'Connect-AzAccount' manually first."
+    return
+}
+
+$results = [System.Collections.Generic.List[PSObject]]::new()
+
 foreach ($sub in $subscriptions) {
-    Write-Host "`nProcessing Subscription: $($sub.Name) [$($sub.Id)]" -ForegroundColor Cyan
+    Write-Host "`n>>> Processing: $($sub.Name) ($($sub.Id))" -ForegroundColor Cyan
+    
+    # Set context for this specific sub/tenant to avoid prompts
+    $null = Set-AzContext -SubscriptionId $sub.Id -TenantId $sub.TenantId -Force
 
-    # Set context to current subscription
-    Set-AzContext -SubscriptionId $sub.Id | Out-Null
+    try {
+        $vaults = Get-AzKeyVault -ErrorAction SilentlyContinue
+        if ($null -eq $vaults) { continue }
 
-    # Get all Key Vaults in the subscription
-    $vaults = Get-AzKeyVault
-
-    if ($vaults.Count -eq 0) {
-        Write-Host "  No Key Vaults found in this subscription." -ForegroundColor Yellow
-        continue
-    }
-
-    foreach ($vault in $vaults) {
-        Write-Host "  Scanning Vault: $($vault.VaultName)" -ForegroundColor Green
-
-        try {
-            $secrets = Get-AzKeyVaultSecret -VaultName $vault.VaultName -ErrorAction Stop
-
-            foreach ($secret in $secrets) {
-                try {
-                    $detail = Get-AzKeyVaultSecret -VaultName $vault.VaultName -Name $secret.Name -ErrorAction Stop
-
-                    if ($null -eq $detail.Expires) {
-                        Write-Host "    [NO EXPIRY] Secret: $($secret.Name)" -ForegroundColor Red
-
-                        $results += [PSCustomObject]@{
-                            SubscriptionName = $sub.Name
-                            SubscriptionId   = $sub.Id
-                            KeyVaultName     = $vault.VaultName
-                            ResourceGroup    = $vault.ResourceGroupName
-                            SecretName       = $secret.Name
-                            Enabled          = $detail.Enabled
-                            CreatedOn        = $detail.Created
-                            UpdatedOn        = $detail.Updated
-                            ExpiryDate       = "NOT SET"
-                        }
+        foreach ($vault in $vaults) {
+            Write-Host "  Scanning Vault: $($vault.VaultName)" -ForegroundColor Gray
+            
+            try {
+                # Get all secrets in this vault
+                $secrets = Get-AzKeyVaultSecret -VaultName $vault.VaultName -ErrorAction Stop
+                
+                foreach ($secret in $secrets) {
+                    # Identify secrets missing an expiry date
+                    if ($null -eq $secret.Expires) {
+                        Write-Host "    [!] No Expiry: $($secret.Name)" -ForegroundColor Yellow
+                        
+                        $results.Add([PSCustomObject]@{
+                            Subscription = $sub.Name
+                            VaultName    = $vault.VaultName
+                            SecretName   = $secret.Name
+                            Enabled      = $secret.Enabled
+                            Created      = $secret.Created
+                        })
                     }
-                } catch {
-                    Write-Host "    [ERROR] Could not retrieve secret '$($secret.Name)': $_" -ForegroundColor Magenta
                 }
+            } catch {
+                Write-Host "    [Access Denied] on $($vault.VaultName)" -ForegroundColor DarkGray
             }
-        } catch {
-            Write-Host "  [ACCESS DENIED or ERROR] Vault: $($vault.VaultName) - $_" -ForegroundColor Magenta
         }
+    } catch {
+        Write-Host "  Error accessing subscription $($sub.Name)" -ForegroundColor Red
     }
 }
 
 # ============================================================
-# Display Results in Table
+# Display & Export to Mac Downloads
 # ============================================================
-Write-Host "`n===== SECRETS WITHOUT EXPIRY DATE =====" -ForegroundColor Yellow
-$results | Format-Table -AutoSize
+$exportPath = "$HOME/Downloads/KeyVault_Report_$(Get-Date -Format 'yyyyMMdd_HHmm').csv"
 
-# ============================================================
-# Export to CSV
-# ============================================================
-$exportPath = "C:\Temp\KeyVault_Secrets_NoExpiry_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
-$results | Export-Csv -Path $exportPath -NoTypeInformation
-Write-Host "`nReport exported to: $exportPath" -ForegroundColor Green
-
-# ============================================================
-# Summary
-# ============================================================
-Write-Host "`n===== SUMMARY =====" -ForegroundColor Cyan
-Write-Host "Total Subscriptions Scanned : $($subscriptions.Count)"
-Write-Host "Total Secrets Without Expiry: $($results.Count)" -ForegroundColor Red
+if ($results.Count -gt 0) {
+    $results | Export-Csv -Path $exportPath -NoTypeInformation
+    $results | Format-Table -AutoSize
+    Write-Host "`nDone! Found $($results.Count) secrets. Report saved to: $exportPath" -ForegroundColor Green
+} else {
+    Write-Host "`nSuccess! No secrets found missing expiry dates." -ForegroundColor Green
+}
