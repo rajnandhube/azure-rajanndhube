@@ -1,45 +1,83 @@
 # ============================================================
-# Script: Find Key Vault Secrets Without Expiry (Mac/All-Subs)
+# Script: Find Key Vault Secrets (Interactive Number Selection)
 # ============================================================
 
-# Get ALL subscriptions across all tenants you just logged into
-$subscriptions = Get-AzSubscription
-
-if ($null -eq $subscriptions) {
-    Write-Error "No subscriptions found. Run 'Connect-AzAccount' manually first."
+# 1. Get and List Subscriptions
+$allSubs = Get-AzSubscription
+if ($null -eq $allSubs) {
+    Write-Error "No subscriptions found. Run 'Connect-AzAccount' first."
     return
+}
+
+Write-Host "`n--- Available Subscriptions ---" -ForegroundColor Cyan
+for ($i = 0; $i -lt $allSubs.Count; $i++) {
+    Write-Host "[$($i + 1)] $($allSubs[$i].Name) ($($allSubs[$i].Id))"
+}
+
+# 2. Input Parameter: Subscription Selection
+$subInput = Read-Host "`nEnter selection number or press Enter for [A]ll"
+$selectedSubs = $allSubs
+
+if (-not [string]::IsNullOrWhiteSpace($subInput)) {
+    $index = [int]$subInput - 1
+    if ($index -ge 0 -and $index -lt $allSubs.Count) {
+        $selectedSubs = $allSubs[$index]
+    } else {
+        Write-Host "Invalid selection. Defaulting to All Subscriptions." -ForegroundColor Yellow
+    }
+}
+
+# 3. Input Parameter: Resource Group Filtering
+$rgChoice = Read-Host "Scan [A]ll Resource Groups or [O]ne specific RG? (Default: A)"
+$targetRG = $null
+if ($rgChoice -eq "O") {
+    $targetRG = Read-Host "Enter the Resource Group Name"
 }
 
 $results = [System.Collections.Generic.List[PSObject]]::new()
 
-foreach ($sub in $subscriptions) {
-    Write-Host "`n>>> Processing: $($sub.Name) ($($sub.Id))" -ForegroundColor Cyan
-    
-    # Set context for this specific sub/tenant to avoid prompts
+# 4. Main Execution Logic
+foreach ($sub in $selectedSubs) {
+    # Format: Name (ID)
+    $subDisplay = "$($sub.Name) ($($sub.Id))"
+    Write-Host "`n>>> Processing: $subDisplay" -ForegroundColor Cyan
     $null = Set-AzContext -SubscriptionId $sub.Id -TenantId $sub.TenantId -Force
 
     try {
-        $vaults = Get-AzKeyVault -ErrorAction SilentlyContinue
-        if ($null -eq $vaults) { continue }
+        if ($null -ne $targetRG) {
+            $vaults = Get-AzKeyVault -ResourceGroupName $targetRG -ErrorAction SilentlyContinue
+        } else {
+            $vaults = Get-AzKeyVault -ErrorAction SilentlyContinue
+        }
 
         foreach ($vault in $vaults) {
             Write-Host "  Scanning Vault: $($vault.VaultName)" -ForegroundColor Gray
             
             try {
-                # Get all secrets in this vault
                 $secrets = Get-AzKeyVaultSecret -VaultName $vault.VaultName -ErrorAction Stop
                 
                 foreach ($secret in $secrets) {
-                    # Identify secrets missing an expiry date
-                    if ($null -eq $secret.Expires) {
-                        Write-Host "    [!] No Expiry: $($secret.Name)" -ForegroundColor Yellow
+                    # Determine if Expiry is set (Yes/No)
+                    $hasExpiry = if ($null -ne $secret.Expires) { "Yes" } else { "No" }
+                    
+                    # Logic: If you only want secrets WITHOUT expiry, keep this filter:
+                    if ($hasExpiry -eq "No") {
                         
+                        # Convert Tags dictionary to a readable string (Key:Value; Key:Value)
+                        $tagString = ""
+                        if ($null -ne $secret.Tags) {
+                            $tagString = ($secret.Tags.GetEnumerator() | ForEach-Object { "$($_.Key):$($_.Value)" }) -join "; "
+                        }
+
                         $results.Add([PSCustomObject]@{
-                            Subscription = $sub.Name
-                            VaultName    = $vault.VaultName
-                            SecretName   = $secret.Name
-                            Enabled      = $secret.Enabled
-                            Created      = $secret.Created
+                            Subscription   = $subDisplay
+                            ResourceGroup  = $vault.ResourceGroupName
+                            VaultName      = $vault.VaultName
+                            SecretName     = $secret.Name
+                            HasExpiry      = $hasExpiry
+                            Tags           = $tagString
+                            Enabled        = $secret.Enabled
+                            Created        = $secret.Created
                         })
                     }
                 }
@@ -48,19 +86,17 @@ foreach ($sub in $subscriptions) {
             }
         }
     } catch {
-        Write-Host "  Error accessing subscription $($sub.Name)" -ForegroundColor Red
+        Write-Host "  Error in subscription $($sub.Name)" -ForegroundColor Red
     }
 }
 
-# ============================================================
-# Display & Export to Mac Downloads
-# ============================================================
-$exportPath = "$HOME/KeyVault_Report_$(Get-Date -Format 'yyyyMMdd_HHmm').csv"
+# 5. Export
+$exportPath = "$HOME/Downloads/KeyVault_Expiry_Report_$(Get-Date -Format 'yyyyMMdd_HHmm').csv"
 
 if ($results.Count -gt 0) {
     $results | Export-Csv -Path $exportPath -NoTypeInformation
     $results | Format-Table -AutoSize
-    Write-Host "`nDone! Found $($results.Count) secrets. Report saved to: $exportPath" -ForegroundColor Green
+    Write-Host "`nDone! Found $($results.Count) items. Saved to: $exportPath" -ForegroundColor Green
 } else {
-    Write-Host "`nSuccess! No secrets found missing expiry dates." -ForegroundColor Green
+    Write-Host "`nNo secrets found missing expiry dates." -ForegroundColor Green
 }
