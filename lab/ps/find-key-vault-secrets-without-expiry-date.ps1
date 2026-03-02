@@ -55,7 +55,7 @@ foreach ($sub in $subscriptions) {
 # ============================================================
 # Display & Export to Mac Downloads
 # ============================================================
-$exportPath = "$HOME/Downloads/KeyVault_Report_$(Get-Date -Format 'yyyyMMdd_HHmm').csv"
+$exportPath = "$HOME/KeyVault_Report_$(Get-Date -Format 'yyyyMMdd_HHmm').csv"
 
 if ($results.Count -gt 0) {
     $results | Export-Csv -Path $exportPath -NoTypeInformation
